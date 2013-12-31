@@ -1,0 +1,28 @@
+#ifndef _QUEUEDATA_H
+#define _QUEUEDATA_H
+
+
+struct listdata
+{
+char filename[100];
+char fpath[100];
+int filesize;
+int mode;
+char *clientip;
+char *httpv;
+char *lasttime;
+char *qtime;
+int connid;
+int tilt;
+char *reqstatus;/*200 404*/ 
+     /*HTTP*/
+char schtime[100];
+struct listdata *next;
+
+};
+
+
+
+
+
+#endif
