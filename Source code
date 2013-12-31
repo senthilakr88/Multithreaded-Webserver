@@ -1,0 +1,748 @@
+#define _GNU_SOURCE
+
+#include <string.h>
+#include <time.h>
+#include <sys/poll.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <netdb.h>
+#include <sys/time.h>
+#include <sys/utsname.h>
+#include <sys/un.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <malloc.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/file.h>
+#include <dirent.h>
+#include <pwd.h>
+
+#include "queuedata.h"
+
+
+
+
+
+struct listdata *list=NULL;
+struct listdata *tobeserved;
+
+
+
+
+pthread_mutex_t lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+pthread_cond_t newrequest = PTHREAD_COND_INITIALIZER;
+pthread_cond_t sch = PTHREAD_COND_INITIALIZER;
+pthread_cond_t free1 = PTHREAD_COND_INITIALIZER;
+pthread_cond_t debug = PTHREAD_COND_INITIALIZER;
+
+int flag=0;
+int freethreads=0;
+int portno=8080;
+char schpolicy[50]="FCFS";
+int condition=0;
+int numreq=0;
+int logrequest=0;
+char logfile[50];
+int timequeue=60;
+int threadnum;
+int debugbit=0;
+char newdir[100];
+char tempfile[50]="/home/senthil/Desktop/";
+void addtoqueue(int,char *);
+void processrequest(int);
+void *acceptrequest(void *);
+void printusage();  
+void *scheduling();
+void servrequest(struct listdata *); 
+struct listdata* getarequest();
+struct listdata* getminimum();
+
+void printusage()
+{
+printf("--------------------------------------------------------------------------------\n");
+printf("-d : Enter debugging mode. That is, do not daemonize, only accept one connection at a time and enable logging to stdout. Without this option, the web server should run as a daemon process in the background\n");
+
+printf("-h : Print a usage summary with all options and exit\n");
+ 
+printf("-l file : Log all requests to the given file. See LOGGING for details\n");
+ 
+printf("-p port : Listen on the given port. If not provided, myhttpd will listen on port 8080\n"); 
+ 
+printf("-r dir : Set the root directory for the http server to dir\n"); 
+ 
+printf("-t time : Set the queuing time to time seconds. The default should be 60 seconds\n"); 
+ 
+printf("-n threadnum: Set number of threads waiting ready in the execution thread pool to threadnum. The default should be 4 execution threads\n"); 
+
+ 
+printf("-s sched : Set the scheduling policy. It can be either FCFS or SJF. The default will be FCFS\n");
+printf("--------------------------------------------------------------------------------\n");
+exit(0);
+} 
+
+struct listdata* getminimum()
+{
+struct listdata *minimum;
+struct listdata *node1,*temp;
+//minimum=malloc(sizeof(struct listdata));
+minimum=tobeserved;
+temp=tobeserved;
+for(node1=tobeserved;(node1->next)!=NULL;node1=node1->next)
+{
+    if((node1->filesize)>((node1->next)->filesize))
+       {
+          if((minimum->filesize)>((node1->next)->filesize))
+           {
+           temp=node1;
+            minimum=node1->next;
+           }
+       }
+}
+
+if(minimum!=tobeserved)
+       {
+        temp->next=minimum->next;    
+       }
+else
+      {
+       tobeserved=tobeserved->next;
+       }
+return minimum;
+}
+
+
+
+void addtoqueue(int client,char *value)
+  {
+    char buffer[512];
+    int i,j,d=0,k; 
+    time_t time1;
+    struct stat data;
+    struct listdata *temp=NULL,*input=NULL;
+    char mode1[20];
+    char filepath[1024];
+    char port1[512];
+    struct passwd *pwd;
+    char file12[50];   
+    input=(struct listdata *)malloc(sizeof(struct listdata));
+    input->clientip=value;
+    input->connid=client;
+    input->next=NULL;
+      
+
+    read(client,buffer,sizeof(buffer));
+     
+   // bzero(filepath,sizeof(filepath));
+    d=sscanf(buffer,"%s%s%s",mode1,filepath,port1);
+ 
+    //memset(buffer,0,sizeof(buffer));
+      
+    if(d!=3) 
+     {
+       printf("unknown format of request\n");
+       printf("request cannot be served\n");
+     }
+   
+    if(strcmp(mode1,"GET")==0)
+     {
+      input->mode=1;
+     }
+    else if(strcmp(mode1,"HEAD")==0)
+     {
+      input->mode=0;
+     }
+     else{
+      printf("mode of request other than GET and HEAD cannot be served\n");
+      exit(0);         
+
+          } 
+   
+     if(filepath[1]=='~')
+       {
+        
+       //  strcpy(tempfile,"/home/sr246/myhttpd");  
+             input->tilt=1;
+       
+            for(k=2;k<strlen(filepath);k++)            
+	       {
+              input->filename[k-2] = filepath[k]; 
+              input->filename[k-1]='\0';
+              
+	       } 
+       }
+ 
+     else
+      {
+       input->tilt=0;
+      for(k=1;k<strlen(filepath);k++)            
+	 {
+              input->filename[k-1] = filepath[k]; 
+              input->filename[k]='\0';
+	 }
+         
+      }     
+   
+    
+      
+      input->httpv=port1;
+      strcpy(input->fpath,filepath);
+
+      if(input->tilt)
+      {
+      memset(file12,0,sizeof(file12));
+      strcpy(file12,tempfile);
+      strcat(file12,input->filename);
+      j=stat(file12,&data);
+       input->lasttime=asctime(gmtime((&data.st_mtime)));
+      }
+      else
+      {
+        memset(file12,0,sizeof(file12));
+        j=stat(input->filename,&data);
+       input->lasttime=asctime(gmtime((&data.st_mtime)));
+     }
+     if(input->mode==1)
+      {
+      input->filesize=data.st_size;
+      }
+      else
+      {
+      input->filesize=0;
+      }
+      time1= time(0);
+      input->qtime=ctime(&time1);
+       
+       
+       i=pthread_mutex_lock(&lock);
+   if(list == NULL)
+      {
+       
+      list=input;
+   
+      }
+   else
+      {
+    temp=list;
+
+    while(temp->next != NULL)
+       {
+         temp=temp->next;
+       }
+       temp->next=input;
+      }
+
+
+
+
+tobeserved=list;
+numreq++;
+//printf("numreq %d %s %d\n",numreq,list->filename,list->connid);
+pthread_cond_signal(&newrequest);
+i=pthread_mutex_unlock(&lock);
+while(debugbit)
+{}
+
+
+
+}
+
+
+
+
+
+void servrequest(struct listdata *input)
+{
+   
+
+DIR *dr;
+int isfile=0;
+size_t size1,size2;
+FILE *fp;
+time_t timevalue=time(0);
+struct dirent *dir1;
+char *buffer2;
+char metadata[1024];
+char infile[1000];
+char buff[1000];
+char file12[50];
+char *filepointer;
+char *filetype;
+strcpy(input->schtime,ctime(&timevalue));
+
+filepointer=strrchr(input->filename,'.');
+
+if(filepointer)
+   isfile=1;
+
+
+   
+if(isfile)
+{
+   if(!strcmp(filepointer,".txt"))
+        {
+        filetype="text";
+        }
+    else if(!strcmp(filepointer,".jpg"))
+        {
+        filetype="jpg";
+        }
+    else if(!strcmp(filepointer,".gif"))
+        {
+        filetype="gif";
+        }
+    else if(!strcmp(filepointer,".html"))
+        {
+        filetype="html";
+        }
+    else
+        {
+        filetype="unknown";
+       }
+
+}
+if(!isfile)
+{
+strcpy(infile,input->filename);
+strcat(infile,"/index.html");
+
+if(fopen(infile,"r"))
+  {   
+   isfile=1;
+   strcpy(input->filename,infile);
+   filetype="text/html";
+  }
+else
+  {
+   isfile=0;
+
+  }
+}
+
+
+
+if(isfile)
+{
+         printf("serving a file request for file : %s\n",input->filename); 
+         if(!input->tilt)   
+         {
+         fp=fopen(input->filename,"r");
+         }
+         else
+         {
+         memset(file12,0,sizeof(file12));
+         strcpy(file12,tempfile);
+         strcat(file12,input->filename);
+         fp=fopen(file12,"r");
+         } 
+         if(fp==NULL)
+            {
+             input->reqstatus="404";
+             sprintf(metadata,"HTTP/1.0 404 File Not Found\n current time: %s\n Server: myhttpd \n\n",ctime(&timevalue));
+             write(input->connid,metadata,strlen(metadata));
+             //printf("%s\n",metadata);
+            }
+
+         else
+            {
+            input->reqstatus="HTTP/1.0 200 OK";
+          
+            sprintf(metadata,"req status: %s \n current time: %s\n Server: myhttpd \n Last Modified : %s \n Content type : %s\n content length :%d\n",input->reqstatus, asctime(gmtime((&timevalue))),input->lasttime,filetype,input->filesize);
+             send(input->connid,metadata,strlen(metadata),0);
+            
+             if(input->mode==1)   /* for GET */
+             {
+             fseek(fp,0,SEEK_END);
+             size1=ftell(fp);
+             fseek(fp,0,SEEK_SET);
+             buffer2=(char *)malloc(sizeof(char)*size1);
+             size2=fread(buffer2,1,size1,fp);
+             
+             if(size1!=size2)
+                  printf("file reading error\n");
+        
+             write(input->connid,buffer2,strlen(buffer2));
+        
+            // printf("%s\n",buffer2);
+              }
+
+           
+           fclose(fp);
+          close(input->connid);   
+        printf("successful\n");
+            }
+     
+
+}
+else
+ {
+      printf("serving a directory request for file : %s\n",input->filename);   
+      filetype="directory";
+       if(!input->tilt)   
+         {
+          dr=opendir(input->filename);
+         }
+         else
+         {
+         memset(file12,0,sizeof(file12));
+         strcpy(file12,tempfile);
+         strcat(file12,input->filename);
+         dr=opendir(input->filename);
+         } 
+      
+     // dr=opendir(input->filename);
+      if(dr==NULL)
+        {
+        input->reqstatus="404";
+        printf("couldnot open the specified directory\n");
+        }
+      else
+        {
+         input->reqstatus="200";
+         sprintf(metadata,"HTTP/1.0 200 OK\n current time: %s\n Server: myhttpd \n Last Modified : %s \n Content type : %s\n content length :%d\n",ctime(&timevalue),input->lasttime,filetype,input->filesize);
+         send(input->connid,metadata,strlen(metadata),0);
+         sprintf(metadata,"<html>\n<h1><INDEX></h1>\n<body>\n<u1>\n");
+         send(input->connid,metadata,strlen(metadata),0);
+         while((dir1=readdir(dr))!=NULL)
+           {
+            if(dir1->d_name[0]!='.') 
+              {
+               sprintf(buff,"<li><a href=%s%d/%s/%s>%s</a></li>\n","http://localhost:",portno,input->filename,dir1->d_name,dir1->d_name);
+               send(input->connid,buff,strlen(buff),0);
+               
+              }
+           }
+          sprintf(buff,"</u1>\n</body>\n</html>");               
+          send(input->connid, buff, strlen(buff), 0);
+         
+          closedir(dr);
+         close(input->connid);
+        }
+}
+
+
+
+
+}
+
+
+void *acceptrequest(void *sock)
+{
+int sockfd,newsockfd;
+socklen_t size1;
+char *clip;
+struct sockaddr_in clientaddr;
+sockfd=(*(int *)(sock));
+
+while(1)
+   {
+    
+    printf("\nlistening thread waiting for new connection.....\n");
+ 
+    size1=sizeof(clientaddr);
+    
+    newsockfd = accept(sockfd,(struct sockaddr *)(&clientaddr),&size1);
+    if(newsockfd<0)
+       printf("server accepting error\n");
+    printf("client connection accepted\n");
+    clip=inet_ntoa(clientaddr.sin_addr);
+    addtoqueue(newsockfd,clip);
+    }
+
+return 0;
+}
+
+
+struct listdata* getarequest()
+{
+struct listdata *s1;
+
+s1=malloc(sizeof(struct listdata));
+ 
+ if(!(strcmp(schpolicy,"SJF"))&&numreq>1)
+    {
+
+     s1=getminimum();
+     }
+   else
+      {
+      s1=tobeserved;           
+      tobeserved=tobeserved->next;
+      list=tobeserved; 
+       } 
+
+return s1;        
+}
+
+void *scheduling()
+{
+pthread_mutex_lock(&lock);
+    while(1){
+           // printf("scheduling %d %d\n",numreq,freethreads); 
+            if(numreq>0&&freethreads>0)
+               {   
+                   
+              pthread_cond_signal(&sch);
+              numreq=numreq-1;
+              freethreads=freethreads-1;
+               }
+             else
+               {
+               if(numreq==0)
+                    {
+               printf("scheduler thread waiting for newrequest.....\n");
+               pthread_cond_wait(&newrequest,&lock);
+                    }
+               else
+                   {
+                    printf("scheduling thread waiting for freethread.....\n");
+                    pthread_cond_wait(&free1,&lock);
+                    sleep(2);
+                   }
+              
+               }
+        }
+            
+}
+
+  
+
+void logging(struct listdata *log)
+{
+FILE *fp;
+
+
+char bufferarray[512];
+
+fp=fopen(logfile,"a");
+if(fp==NULL)
+  {  
+   perror("logfile opening error");
+  }
+else
+   {
+
+sprintf(bufferarray,"  %s -[%s] [%s] ",log->clientip,log->qtime,log->schtime);
+
+
+if(log->mode==1)
+      strcat(bufferarray,"\"GET /");
+else
+      strcat(bufferarray,"\"HEAD /");
+
+
+strcat(bufferarray,log->filename);
+strcat(bufferarray," ");
+strcat(bufferarray,log->httpv);
+strcat(bufferarray,"\" ");
+strcat(bufferarray,log->reqstatus);
+strcat(bufferarray," ");
+if(debugbit)
+fprintf(stdout,"%s%d",bufferarray,log->filesize);
+else
+fprintf(fp,"%s%d",bufferarray,log->filesize);
+fclose(fp);
+     }
+}
+
+void *getnextrequest()
+{
+struct listdata* a1;
+
+pthread_mutex_lock(&lock);
+
+pthread_cond_signal(&free1);
+
+pthread_cond_wait(&sch,&lock);
+ 
+while(1) 
+  {
+    pthread_mutex_lock(&lock);
+     {
+     
+    a1=getarequest();
+      }
+    pthread_mutex_unlock(&lock);
+     servrequest(a1);
+         if(logrequest==1)
+           {
+           logging(a1);
+            }      
+       
+     free(a1);      
+     if(debugbit)
+      {
+       exit(0);
+      }
+     pthread_mutex_lock(&lock);
+     freethreads=freethreads+1; 
+     pthread_mutex_unlock(&lock);
+
+     
+     pthread_cond_signal(&free1);
+     
+     pthread_cond_wait(&sch,&lock);
+     
+  }
+}
+       
+        
+
+
+int main(int argc, char *argv[])
+{
+int sock_fd,listen_fd;
+socklen_t len;
+
+
+pthread_t listening,schedul;
+time_t time1,time2;
+
+int i;
+
+
+struct sockaddr_in serv_addr,remote;
+
+
+for(i=0;i<argc;i++)
+{
+      if(strcmp(argv[i],"-d")==0)
+         {
+           debugbit=1;
+
+         }
+      else if(strcmp(argv[i],"-h")==0)
+         {
+          printusage();
+          }
+
+      else if(strcmp(argv[i],"-l")==0)
+          {
+           strcpy(logfile,argv[++i]);
+           logrequest=1;
+           
+          } 
+      else if(strcmp(argv[i],"-p")==0)
+         {
+          portno=atoi(argv[++i]);
+          
+          } 
+     else if(strcmp(argv[i],"-r")==0)
+         {
+          strcpy(newdir,argv[++i]);
+            i=chdir(newdir);
+	     if(i!=0)
+              {
+		printf("could not change to the given directory\n");
+                exit(1);
+	      }
+ 
+          }
+    else if(strcmp(argv[i],"-t")==0)
+         {
+          timequeue=atoi(argv[++i]);
+          
+          }
+     else if(strcmp(argv[i],"-n")==0)
+         {
+          threadnum=atoi(argv[++i]);
+          freethreads=threadnum;
+          
+          }   
+     else if(strcmp(argv[i],"-s")==0)
+         {
+          
+          strcpy(schpolicy,argv[++i]);
+             if(!strcmp(schpolicy,"FCFS"))
+               printf("FCFS Scheduling\n");     
+             else if(!strcmp(schpolicy,"SJF"))
+                printf("SJF Scheduling\n");
+             else
+               {
+                printf("unknown Scheduling policy\n");
+                exit(0);
+               }
+          } 
+      else
+         {
+          
+          }
+}
+
+pthread_t working[threadnum];
+
+//creating sever side socket    
+sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+if (sock_fd == -1)
+   {
+    perror("Server socket creation failes\n");
+   }
+
+//memset((char *)&serv_addr,0, sizeof(serv_addr));
+
+serv_addr.sin_family =  AF_INET;
+serv_addr.sin_port = htons(portno);
+serv_addr.sin_addr.s_addr = INADDR_ANY;
+
+printf("connecting to client via port no:%d\n",portno);
+
+
+
+//binding socket
+    if(bind(sock_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr))!=0)
+         perror("binding failed");
+    
+
+len=sizeof(remote);
+     if (getsockname(sock_fd, (struct sockaddr *) &remote, &len) < 0) {
+		perror("getsockname");
+		exit(1);
+	}
+   
+ listen_fd=listen(sock_fd,25);
+            if (listen_fd == -1)
+                perror("Failed to lisen to incoming connections!\n");
+   
+
+
+
+
+
+pthread_create(&listening,NULL,acceptrequest,(void *)(&sock_fd));
+time1=time(0);
+
+while((time(&time2)-time1)<timequeue)
+{}
+
+
+for (i=0;i<threadnum;i++)
+    {
+	
+	pthread_create(&working[i],NULL,getnextrequest,NULL);
+    }
+
+time1=time(0);
+
+while((time(&time2)-time1)<5)
+{}
+
+pthread_create(&schedul,NULL,scheduling,NULL);
+
+
+
+
+
+pthread_join(listening,NULL);
+pthread_join(schedul,NULL);
+printf("successful\n");
+
+return 0;   
+}
+
